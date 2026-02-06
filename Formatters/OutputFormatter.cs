@@ -1,3 +1,4 @@
+using ExcelCLI.Services;
 using Spectre.Console;
 using System.Globalization;
 using System.Reflection;
@@ -5,86 +6,117 @@ using System.Text.Json;
 
 namespace ExcelCLI.Formatters;
 
+/// <summary>Output format mode for JSON serialization.</summary>
+public enum JsonMode { Off, Pretty, Compact, Ndjson }
+
 public static class OutputFormatter
 {
     private const string SchemaVersion = "1.0";
-    private static readonly JsonSerializerOptions JsonOptions = new()
+
+    private static readonly JsonSerializerOptions JsonPrettyOptions = new()
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    private static readonly IAnsiConsole ErrorConsole = AnsiConsole.Create(new AnsiConsoleSettings
+    private static readonly JsonSerializerOptions JsonCompactOptions = new()
     {
-        Out = new AnsiConsoleOutput(Console.Error)
-    });
+        WriteIndented = false,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
 
     private static readonly string ToolVersion = GetToolVersion();
 
-    public static void PrintSheetList(List<string> sheets, bool asJson, bool quiet, string command)
+    private static IAnsiConsole? _errorConsole;
+
+    /// <summary>Get or create the stderr console, optionally with no-color.</summary>
+    public static IAnsiConsole GetErrorConsole(bool noColor = false)
     {
-        if (asJson)
+        if (_errorConsole == null || noColor)
         {
-            WriteJsonSuccess(command, new { sheets });
-            return;
+            var settings = new AnsiConsoleSettings
+            {
+                Out = new AnsiConsoleOutput(Console.Error)
+            };
+            if (noColor)
+            {
+                settings.ColorSystem = ColorSystemSupport.NoColors;
+            }
+            _errorConsole = AnsiConsole.Create(settings);
         }
-
-        if (quiet)
-            return;
-
-        var table = new Table();
-        table.AddColumn(new TableColumn("[bold]Sheet Name[/]").Centered());
-
-        foreach (var sheet in sheets)
-        {
-            table.AddRow(sheet);
-        }
-
-        ErrorConsole.Write(table);
-        ErrorConsole.MarkupLine($"\n[green]Found {sheets.Count} sheet(s)[/]");
+        return _errorConsole;
     }
 
-    public static void PrintSheetInfo(string sheetName, (int Rows, int Cols, string FirstCell, string LastCell) dimensions, bool asJson, bool quiet, string command)
+    // ── Sheet list ──────────────────────────────────────────────────────
+
+    public static void PrintSheetList(List<string> sheets, JsonMode jsonMode, bool quiet, bool noColor, string command)
     {
-        if (asJson)
+        if (jsonMode != JsonMode.Off)
+        {
+            WriteJsonSuccess(command, new { sheets }, jsonMode: jsonMode);
+            return;
+        }
+
+        if (quiet) return;
+
+        var con = GetErrorConsole(noColor);
+        var table = new Table();
+        table.AddColumn(new TableColumn("[bold]Sheet Name[/]").Centered());
+        foreach (var sheet in sheets) table.AddRow(sheet);
+        con.Write(table);
+        con.MarkupLine($"\n[green]Found {sheets.Count} sheet(s)[/]");
+    }
+
+    // ── Sheet info / inspect ────────────────────────────────────────────
+
+    public static void PrintSheetInfo(string sheetName, (int Rows, int Cols, string FirstCell, string LastCell) dims, JsonMode jsonMode, bool quiet, bool noColor, string command)
+    {
+        if (jsonMode != JsonMode.Off)
         {
             WriteJsonSuccess(command, new
             {
                 sheet = sheetName,
-                rows = dimensions.Rows,
-                columns = dimensions.Cols,
-                range = new { first = dimensions.FirstCell, last = dimensions.LastCell }
-            });
+                rows = dims.Rows,
+                columns = dims.Cols,
+                range = new { first = dims.FirstCell, last = dims.LastCell }
+            }, jsonMode: jsonMode);
             return;
         }
 
-        if (quiet)
-            return;
+        if (quiet) return;
 
-        var table = new Table();
-        table.Border(TableBorder.Rounded);
+        var con = GetErrorConsole(noColor);
+        var table = new Table().Border(TableBorder.Rounded);
         table.AddColumn("[bold]Property[/]");
         table.AddColumn("[bold]Value[/]");
-
         table.AddRow("Sheet Name", sheetName);
-        table.AddRow("Rows", dimensions.Rows.ToString());
-        table.AddRow("Columns", dimensions.Cols.ToString());
-        table.AddRow("First Cell", dimensions.FirstCell);
-        table.AddRow("Last Cell", dimensions.LastCell);
-
-        ErrorConsole.Write(table);
+        table.AddRow("Rows", dims.Rows.ToString());
+        table.AddRow("Columns", dims.Cols.ToString());
+        table.AddRow("First Cell", dims.FirstCell);
+        table.AddRow("Last Cell", dims.LastCell);
+        con.Write(table);
     }
 
-    public static void PrintData(List<Dictionary<string, object?>> data, bool asJson, bool quiet, string command, int? limit = null)
+    // ── Read data ───────────────────────────────────────────────────────
+
+    public static void PrintData(List<Dictionary<string, object?>> data, JsonMode jsonMode, bool quiet, bool noColor, string command, int? limit = null)
     {
         var displayData = limit.HasValue ? data.Take(limit.Value).ToList() : data;
 
-        if (asJson)
+        if (jsonMode != JsonMode.Off)
         {
             var warnings = new List<string>();
             if (limit.HasValue && data.Count > limit.Value)
-            {
                 warnings.Add($"Showing {displayData.Count} of {data.Count} rows (use --limit to show more)");
+
+            if (jsonMode == JsonMode.Ndjson)
+            {
+                // NDJSON: one JSON object per line, no envelope per row
+                var envelope = BuildSuccessEnvelope(command, new { count = data.Count, displayed = displayData.Count }, warnings);
+                Console.Out.WriteLine(JsonSerializer.Serialize(envelope, JsonCompactOptions));
+                foreach (var row in displayData)
+                    Console.Out.WriteLine(JsonSerializer.Serialize(row, JsonCompactOptions));
+                return;
             }
 
             WriteJsonSuccess(command, new
@@ -92,100 +124,89 @@ public static class OutputFormatter
                 rows = displayData,
                 count = data.Count,
                 displayed = displayData.Count
-            }, warnings);
+            }, warnings, jsonMode);
             return;
         }
 
-        if (quiet)
-            return;
+        if (quiet) return;
+
+        var con = GetErrorConsole(noColor);
 
         if (data.Count == 0)
         {
-            ErrorConsole.MarkupLine("[yellow]No data found[/]");
+            con.MarkupLine("[yellow]No data found[/]");
             return;
         }
 
-        var table = new Table();
-        table.Border(TableBorder.Rounded);
-
-        // Headers
+        var table = new Table().Border(TableBorder.Rounded);
         var headers = data[0].Keys.ToList();
-        foreach (var header in headers)
-        {
-            table.AddColumn(new TableColumn($"[bold]{header}[/]"));
-        }
-
-        // Rows
+        foreach (var header in headers) table.AddColumn(new TableColumn($"[bold]{header}[/]"));
         foreach (var row in displayData)
         {
             var values = headers.Select(h => FormatValue(row.GetValueOrDefault(h))).ToArray();
             table.AddRow(values);
         }
-
-        ErrorConsole.Write(table);
+        con.Write(table);
 
         if (limit.HasValue && data.Count > limit.Value)
-        {
-            ErrorConsole.MarkupLine($"\n[yellow]Showing {displayData.Count} of {data.Count} rows (use --limit to show more)[/]");
-        }
+            con.MarkupLine($"\n[yellow]Showing {displayData.Count} of {data.Count} rows (use --limit to show more)[/]");
         else
-        {
-            ErrorConsole.MarkupLine($"\n[green]Total: {data.Count} row(s)[/]");
-        }
+            con.MarkupLine($"\n[green]Total: {data.Count} row(s)[/]");
     }
 
-    public static void PrintSearchResults(List<(string Cell, object? Value)> results, bool asJson, bool quiet, string command)
+    // ── Search results ──────────────────────────────────────────────────
+
+    public static void PrintSearchResults(List<(string Cell, object? Value)> results, JsonMode jsonMode, bool quiet, bool noColor, string command)
     {
-        if (asJson)
+        if (jsonMode != JsonMode.Off)
         {
             WriteJsonSuccess(command, new
             {
                 results = results.Select(r => new { cell = r.Cell, value = r.Value }).ToList(),
                 count = results.Count
-            });
+            }, jsonMode: jsonMode);
             return;
         }
 
-        if (quiet)
-            return;
+        if (quiet) return;
+
+        var con = GetErrorConsole(noColor);
 
         if (results.Count == 0)
         {
-            ErrorConsole.MarkupLine("[yellow]No matches found[/]");
+            con.MarkupLine("[yellow]No matches found[/]");
             return;
         }
 
         var table = new Table();
         table.AddColumn("[bold]Cell[/]");
         table.AddColumn("[bold]Value[/]");
-
-        foreach (var (cell, value) in results)
-        {
-            table.AddRow(cell, FormatValue(value));
-        }
-
-        ErrorConsole.Write(table);
-        ErrorConsole.MarkupLine($"\n[green]Found {results.Count} match(es)[/]");
+        foreach (var (cell, value) in results) table.AddRow(cell, FormatValue(value));
+        con.Write(table);
+        con.MarkupLine($"\n[green]Found {results.Count} match(es)[/]");
     }
 
-    public static void PrintFormulas(List<(string Cell, string Formula, object? Value)> formulas, bool asJson, bool quiet, string command)
+    // ── Formulas ────────────────────────────────────────────────────────
+
+    public static void PrintFormulas(List<(string Cell, string Formula, object? Value)> formulas, JsonMode jsonMode, bool quiet, bool noColor, string command)
     {
-        if (asJson)
+        if (jsonMode != JsonMode.Off)
         {
             WriteJsonSuccess(command, new
             {
                 formulas = formulas.Select(f => new { cell = f.Cell, formula = f.Formula, value = f.Value }).ToList(),
                 count = formulas.Count
-            });
+            }, jsonMode: jsonMode);
             return;
         }
 
-        if (quiet)
-            return;
+        if (quiet) return;
+
+        var con = GetErrorConsole(noColor);
 
         if (formulas.Count == 0)
         {
-            ErrorConsole.MarkupLine("[yellow]No formulas found[/]");
+            con.MarkupLine("[yellow]No formulas found[/]");
             return;
         }
 
@@ -193,59 +214,137 @@ public static class OutputFormatter
         table.AddColumn("[bold]Cell[/]");
         table.AddColumn("[bold]Formula[/]");
         table.AddColumn("[bold]Value[/]");
-
         foreach (var (cell, formula, value) in formulas)
-        {
             table.AddRow(cell, $"[cyan]{formula}[/]", FormatValue(value));
-        }
-
-        ErrorConsole.Write(table);
-        ErrorConsole.MarkupLine($"\n[green]Found {formulas.Count} formula(s)[/]");
+        con.Write(table);
+        con.MarkupLine($"\n[green]Found {formulas.Count} formula(s)[/]");
     }
 
-    public static void WriteError(string command, string errorCode, string message, bool asJson, bool quiet)
+    // ── Cell value ──────────────────────────────────────────────────────
+
+    public static void PrintCellValue(string cell, object? value, JsonMode jsonMode, bool quiet, bool noColor, string command)
     {
-        if (asJson)
+        if (jsonMode != JsonMode.Off)
         {
-            WriteJsonError(command, errorCode, message);
+            WriteJsonSuccess(command, new { cell, value }, jsonMode: jsonMode);
+            return;
         }
+
+        PrintSuccess($"Cell {cell}: {FormatValue(value)}", quiet, noColor);
+    }
+
+    public static void PrintCellInfo(CellInfo info, JsonMode jsonMode, bool quiet, bool noColor, string command)
+    {
+        if (jsonMode != JsonMode.Off)
+        {
+            WriteJsonSuccess(command, new { cell = info.Address, value = info.Value, type = info.Type, raw = info.Raw }, jsonMode: jsonMode);
+            return;
+        }
+
+        PrintSuccess($"Cell {info.Address} [{info.Type}]: {FormatValue(info.Value)} (raw: {info.Raw})", quiet, noColor);
+    }
+
+    // ── Errors / helpers ────────────────────────────────────────────────
+
+    public static void WriteError(string command, string errorCode, string message, JsonMode jsonMode, bool quiet, bool noColor = false)
+    {
+        if (jsonMode != JsonMode.Off)
+            WriteJsonError(command, errorCode, message, jsonMode);
 
         if (!quiet)
+            GetErrorConsole(noColor).MarkupLine($"[red]Error:[/] {message}");
+    }
+
+    public static void PrintSuccess(string message, bool quiet, bool noColor = false)
+    {
+        if (quiet) return;
+        GetErrorConsole(noColor).MarkupLine($"[green]{message}[/]");
+    }
+
+    public static void PrintHint(string message, bool quiet, bool noColor = false)
+    {
+        if (quiet) return;
+        GetErrorConsole(noColor).MarkupLine(message);
+    }
+
+    // ── Tool manifest ───────────────────────────────────────────────────
+
+    public static void PrintToolManifest()
+    {
+        var manifest = new
         {
-            ErrorConsole.MarkupLine($"[red]Error:[/] {message}");
-        }
+            name = "excel-cli",
+            version = ToolVersion,
+            schemaVersion = SchemaVersion,
+            description = "Universal Excel data extraction tool for humans and LLMs",
+            tools = new object[]
+            {
+                new {
+                    name = "info",
+                    description = "List all sheets in a workbook",
+                    parameters = new object[] {
+                        new { name = "file", type = "string", required = true, description = "Path to .xlsx/.xlsm file" }
+                    }
+                },
+                new {
+                    name = "inspect",
+                    description = "Show sheet dimensions and range",
+                    parameters = new object[] {
+                        new { name = "file", type = "string", required = true, description = "Path to .xlsx/.xlsm file" },
+                        new { name = "sheet", type = "string", required = true, description = "Sheet name" }
+                    }
+                },
+                new {
+                    name = "read",
+                    description = "Read sheet data as structured records",
+                    parameters = new object[] {
+                        new { name = "file", type = "string", required = true, description = "Path to .xlsx/.xlsm file" },
+                        new { name = "sheet", type = "string", required = true, description = "Sheet name" },
+                        new { name = "--range", type = "string", required = false, description = "Cell range (e.g. A1:C10)" },
+                        new { name = "--limit", type = "integer", required = false, description = "Max rows to return" },
+                        new { name = "--header-row", type = "integer", required = false, description = "Row number to use as header" }
+                    }
+                },
+                new {
+                    name = "cell",
+                    description = "Read a single cell value with type info",
+                    parameters = new object[] {
+                        new { name = "file", type = "string", required = true, description = "Path to .xlsx/.xlsm file" },
+                        new { name = "sheet", type = "string", required = true, description = "Sheet name" },
+                        new { name = "cell", type = "string", required = true, description = "Cell address (e.g. B5)" }
+                    }
+                },
+                new {
+                    name = "search",
+                    description = "Search for a value across all cells in a sheet",
+                    parameters = new object[] {
+                        new { name = "file", type = "string", required = true, description = "Path to .xlsx/.xlsm file" },
+                        new { name = "sheet", type = "string", required = true, description = "Sheet name" },
+                        new { name = "term", type = "string", required = true, description = "Search term (substring or regex with --regex)" },
+                        new { name = "--regex", type = "boolean", required = false, description = "Treat term as regex pattern" }
+                    }
+                },
+                new {
+                    name = "formulas",
+                    description = "List all cells with formulas in a sheet",
+                    parameters = new object[] {
+                        new { name = "file", type = "string", required = true, description = "Path to .xlsx/.xlsm file" },
+                        new { name = "sheet", type = "string", required = true, description = "Sheet name" }
+                    }
+                }
+            },
+            outputModes = new[] { "--json", "--json-compact", "--ndjson" },
+            globalOptions = new[] { "--quiet", "--no-color" }
+        };
+
+        Console.Out.WriteLine(JsonSerializer.Serialize(manifest, JsonPrettyOptions));
     }
 
-    public static void PrintSuccess(string message, bool quiet)
+    // ── JSON internals ──────────────────────────────────────────────────
+
+    private static JsonEnvelope<T> BuildSuccessEnvelope<T>(string command, T data, List<string>? warnings = null)
     {
-        if (quiet)
-            return;
-
-        ErrorConsole.MarkupLine($"[green]{message}[/]");
-    }
-
-    public static void PrintHint(string message, bool quiet)
-    {
-        if (quiet)
-            return;
-
-        ErrorConsole.MarkupLine(message);
-    }
-
-    public static void PrintCellValue(string cell, object? value, bool asJson, bool quiet, string command)
-    {
-        if (asJson)
-        {
-            WriteJsonSuccess(command, new { cell, value });
-            return;
-        }
-
-        PrintSuccess($"Cell {cell}: {FormatValue(value)}", quiet);
-    }
-
-    private static void WriteJsonSuccess<T>(string command, T data, List<string>? warnings = null)
-    {
-        var envelope = new JsonEnvelope<T>
+        return new JsonEnvelope<T>
         {
             SchemaVersion = SchemaVersion,
             ToolVersion = ToolVersion,
@@ -256,11 +355,16 @@ public static class OutputFormatter
             ErrorCode = null,
             Message = null
         };
-
-        Console.Out.WriteLine(JsonSerializer.Serialize(envelope, JsonOptions));
     }
 
-    private static void WriteJsonError(string command, string errorCode, string message)
+    private static void WriteJsonSuccess<T>(string command, T data, List<string>? warnings = null, JsonMode jsonMode = JsonMode.Pretty)
+    {
+        var envelope = BuildSuccessEnvelope(command, data, warnings);
+        var opts = jsonMode == JsonMode.Compact ? JsonCompactOptions : JsonPrettyOptions;
+        Console.Out.WriteLine(JsonSerializer.Serialize(envelope, opts));
+    }
+
+    private static void WriteJsonError(string command, string errorCode, string message, JsonMode jsonMode = JsonMode.Pretty)
     {
         var envelope = new JsonEnvelope<object>
         {
@@ -274,7 +378,8 @@ public static class OutputFormatter
             Message = message
         };
 
-        Console.Out.WriteLine(JsonSerializer.Serialize(envelope, JsonOptions));
+        var opts = jsonMode == JsonMode.Compact ? JsonCompactOptions : JsonPrettyOptions;
+        Console.Out.WriteLine(JsonSerializer.Serialize(envelope, opts));
     }
 
     private static string FormatValue(object? value)
