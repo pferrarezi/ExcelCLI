@@ -1,0 +1,47 @@
+{
+  "skill_name": "excel-data-extractor",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I have an Excel file called sales_report.xlsx. Can you tell me what sheets are in it and show me the first 10 rows from the main sheet?",
+      "expected_output": "Uses ExcelCLI to list sheets with 'info' command, then reads data with 'read' command using --limit 10 and --json flags",
+      "files": [],
+      "expectations": [
+        "Uses C:\\apps\\clis\\ExcelCLI.exe with correct path",
+        "Runs 'info' command first to discover sheets",
+        "Uses --json flag for structured output",
+        "Checks the 'success' field in JSON response before processing",
+        "Runs 'read' command with --limit 10 to show first rows",
+        "Presents the results clearly to the user"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Find all cells in the 'Customers' sheet of contacts.xlsx that contain the name 'Silva'.",
+      "expected_output": "Uses ExcelCLI search command with case-insensitive text matching",
+      "files": [],
+      "expectations": [
+        "Uses 'search' command with correct syntax",
+        "Specifies the sheet name 'Customers' correctly",
+        "Uses --json flag for structured output",
+        "Searches for 'Silva' (the search is case-insensitive by default)",
+        "Parses JSON response and presents matching cells to user",
+        "Shows cell addresses and values from search results"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "What's the value in cell D15 of the Budget sheet in financials.xlsx? I need to know what type of data it is too.",
+      "expected_output": "Uses ExcelCLI cell command to extract single cell with type information",
+      "files": [],
+      "expectations": [
+        "Uses 'cell' command to read a specific cell",
+        "Correctly specifies sheet name 'Budget' and cell address 'D15'",
+        "Uses --json flag for structured output",
+        "Extracts and presents both the value and the type from JSON response",
+        "Shows the cell type (string, number, date, etc.) to the user",
+        "Checks 'success' field before processing the result"
+      ]
+    }
+  ]
+}
